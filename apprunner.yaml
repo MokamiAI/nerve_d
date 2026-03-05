@@ -17,3 +17,22 @@ run:
   env:
     - name: PYTHONUNBUFFERED
       value: "1"
+    # Add your environment variables here
+    - name: SUPABASE_URL
+      value: "https://rmalkegrxfxkivgdowyg.supabase.co"
+    - name: SUPABASE_SERVICE_ROLE_KEY
+      value: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJtYWxrZWdyeGZ4a2l2Z2Rvd3lnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MjQ4MDM1OCwiZXhwIjoyMDg4MDU2MzU4fQ.4wyec6L7uwc9UYPdah8yX3yW7qnUwtWw14PTfzF_Z7o"
+    - name: XDS_USERNAME
+      value: "Simakade_T"
+    - name: XDS_PASSWORD
+      value: "Inter@2026!DT"
+    - name: XDS_PRODUCT_ID
+      value: "15"
+    - name: XDS_REPORT_ID
+      value: "1"
+    - name: BUREAU_POLL_INTERVAL_SECONDS
+      value: "7"
+    - name: BUREAU_BATCH_SIZE
+      value: "20"
+    - name: BUREAU_FRESHNESS_DAYS
+      value: "30"
