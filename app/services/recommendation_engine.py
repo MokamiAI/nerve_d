@@ -19,7 +19,7 @@
 #   Max = 7
 #
 # SCORE → MAX COVER MAPPING:
-#   0     → client does not qualify (skipped — best_product_id is NOT NULL)
+#   0     → R10 000  (entry fallback — everyone qualifies for at least this)
 #   1     → R10 000
 #   2     → R20 000
 #   3     → R30 000
@@ -35,12 +35,22 @@
 #   Same coverage_type + age_range, but one cover level below the best
 #   product that was found. Null if best is already at R10 000.
 #
-# COVERAGE TYPE (from dikgoboro_clients.product_interest):
-#   'Funeral Insurance'  → 'Single Member'  (default)
-#   'Single Member'      → 'Single Member'
-#   'Family'             → 'Family'
-#   'Single Parent'      → 'Single Parent'
-#   'Extended Family'    → 'Extended Family'
+# PRODUCT INTEREST GATE:
+#   Engine only runs when dikgoboro_clients.product_interest = 'Funeral Insurance'.
+#   If product_interest is null, empty, or a different product, the engine skips
+#   the client entirely. This makes the system forward-compatible — when new
+#   product types are added, separate engines will handle them.
+#
+# COVERAGE TYPE INFERENCE (from bureau profile only):
+#   product_interest is always 'Funeral Insurance' — not used for type selection.
+#   Coverage type is inferred purely from bureau signals:
+#
+#   1. marital_status = married / re-married         → 'Family'
+#   2. marital_status = divorced / widowed / separated → 'Single Parent'
+#   3. No marital signal available                   → 'Single Member'
+#
+#   'Extended Family' is never auto-inferred — it must be explicitly
+#   requested by the client through a separate channel.
 #
 # AGE BAND:
 #   0–17  → '0 - 17'  |  18–64 → '18 - 64'  |  65–74 → '65 - 74'
@@ -72,9 +82,9 @@ SORRY_MESSAGE = (
     "your profile at the moment."
 )
 
-# Score → max cover (rand). None = does not qualify.
-SCORE_TO_COVER: Dict[int, Optional[int]] = {
-    0: None,
+# Score → max cover (rand). Score 0 always gets R10K entry fallback.
+SCORE_TO_COVER: Dict[int, int] = {
+    0: 10000,
     1: 10000,
     2: 20000,
     3: 30000,
@@ -87,13 +97,42 @@ SCORE_TO_COVER: Dict[int, Optional[int]] = {
 # Ordered highest → lowest for walk-down logic
 COVER_LEVELS: List[int] = [50000, 40000, 30000, 20000, 10000]
 
-INTEREST_TO_COVERAGE_TYPE: Dict[str, str] = {
-    "funeral insurance": "Single Member",
-    "single member":     "Single Member",
-    "family":            "Family",
-    "single parent":     "Single Parent",
-    "extended family":   "Extended Family",
+# Hard gates derived from the product sheet.
+# Defines the MAXIMUM cover allowed per (age_band, coverage_type) combination,
+# regardless of what rows exist in dikgoboro_products.
+# This prevents accidental DB inserts from leaking through to recommendations.
+AGE_COVER_HARD_LIMITS: Dict[str, Dict[str, int]] = {
+    "0 - 17":  {
+        "Extended Family": 50000,
+        # 0–17 is exclusive to Extended Family — other types not valid
+    },
+    "18 - 64": {
+        "Single Member":   50000,
+        "Family":          50000,
+        "Single Parent":   50000,
+        "Extended Family": 50000,
+    },
+    "65 - 74": {
+        "Single Member":   50000,
+        "Family":          50000,
+        "Single Parent":   50000,
+        "Extended Family": 50000,
+    },
+    "75 - 84": {
+        "Single Member":   30000,
+        "Family":          20000,
+        "Single Parent":   30000,
+        "Extended Family": 20000,
+    },
+    "85+": {
+        "Single Member":   20000,
+        "Family":          10000,
+        "Single Parent":   20000,
+        "Extended Family": 10000,
+    },
 }
+
+
 
 
 # =============================================================================
@@ -127,12 +166,27 @@ def _age_to_band(age: Optional[int]) -> Optional[str]:
     return "85+"
 
 
-def _resolve_coverage_type(product_interest: Optional[str]) -> str:
-    if not product_interest:
-        return "Single Member"
-    return INTEREST_TO_COVERAGE_TYPE.get(
-        product_interest.strip().lower(), "Single Member"
-    )
+def _infer_coverage_type(features: Optional[Dict[str, Any]]) -> str:
+    """
+    Infer coverage type purely from bureau profile signals.
+
+    product_interest is always 'Funeral Insurance' for all Dikgoboro clients
+    and carries no useful type signal — ignored entirely.
+
+      married / re-married               → Family
+      divorced / widowed / separated     → Single Parent
+      no marital data or single          → Single Member
+
+    Extended Family is never auto-inferred — it requires explicit
+    client request through a separate channel.
+    """
+    if features:
+        marital = str(features.get("marital_status") or "").strip().lower()
+        if marital in ("married", "re-married", "remarried", "m"):
+            return "Family"
+        if marital in ("divorced", "widowed", "separated", "d", "w", "s"):
+            return "Single Parent"
+    return "Single Member"
 
 
 # =============================================================================
@@ -204,13 +258,25 @@ def _find_best_and_next(
     """
     Returns (best_product, next_best_product).
 
-    Best:      highest available cover level the client qualifies for.
+    Best:      highest available cover level the client qualifies for,
+               capped by both nerve_score AND the age/coverage hard limit.
     Next best: one cover level below best (same coverage_type + age_band).
-    Both may be None if no product exists for the age/type combination.
+    Both may be None if the age_band is invalid for the coverage_type
+    (e.g. 0-17 for Single Member) or no product row exists in the catalogue.
     """
-    max_cover = SCORE_TO_COVER.get(nerve_score)
-    if max_cover is None:
-        return None, None  # score 0 — does not qualify
+    # Hard gate 1: check age band is valid for this coverage type at all
+    age_limits = AGE_COVER_HARD_LIMITS.get(age_band, {})
+    if coverage_type not in age_limits:
+        logger.warning(
+            "Age band '%s' is not valid for coverage type '%s' — no recommendation possible.",
+            age_band, coverage_type,
+        )
+        return None, None
+
+    # Hard gate 2: cap cover at the lower of score-driven max AND age hard limit
+    score_cover = SCORE_TO_COVER.get(nerve_score, 10000)
+    age_max     = age_limits[coverage_type]
+    max_cover   = min(score_cover, age_max)
 
     # Walk down from target cover to find best
     start_idx = COVER_LEVELS.index(max_cover) if max_cover in COVER_LEVELS else 0
@@ -426,6 +492,16 @@ def generate_recommendation_for_customer(customer_id: str) -> Dict[str, Any]:
     if not client:
         return {"status": "skipped", "reason": "client_not_found"}
 
+    # Gate: only run this engine for Funeral Insurance clients.
+    # Other product types will be handled by their own engines in future.
+    product_interest = (client.get("product_interest") or "").strip().lower()
+    if product_interest != "funeral insurance":
+        return {
+            "status": "skipped",
+            "reason": f"product_interest is '{client.get('product_interest') or 'not set'}' — "
+                      f"funeral insurance engine only runs for 'Funeral Insurance' clients",
+        }
+
     # 2. Age band
     age = _safe_int(client.get("age"), 0) or None
     if not age and client.get("date_of_birth"):
@@ -442,10 +518,14 @@ def generate_recommendation_for_customer(customer_id: str) -> Dict[str, Any]:
     if not age_band:
         return {"status": "skipped", "reason": "client_age_unknown"}
 
-    coverage_type = _resolve_coverage_type(client.get("product_interest"))
-
-    # 3. Bureau features
+    # 3. Bureau features — check deceased BEFORE attempting expensive extraction
     features = get_latest_bureau_features(customer_id)
+
+    # Early deceased exit: if we already have features and client is deceased,
+    # stop immediately — no extraction, no scoring, no DB writes needed.
+    if features and features.get("is_deceased") is True:
+        return {"status": "skipped", "reason": "client_is_deceased"}
+
     if not features:
         try:
             bp_res = (
@@ -468,8 +548,13 @@ def generate_recommendation_for_customer(customer_id: str) -> Dict[str, Any]:
     if not features:
         return {"status": "skipped", "reason": "no_bureau_features_available"}
 
+    # Safety net: re-check deceased after extraction in case features were
+    # just inserted for the first time above.
     if features.get("is_deceased") is True:
         return {"status": "skipped", "reason": "client_is_deceased"}
+
+    # Infer coverage type from bureau marital status signal
+    coverage_type = _infer_coverage_type(features)
 
     # 4. Nerve score
     nerve_score = _compute_nerve_score(features)
@@ -479,12 +564,14 @@ def generate_recommendation_for_customer(customer_id: str) -> Dict[str, Any]:
         coverage_type, age_band, nerve_score
     )
 
-    # best_product_id is NOT NULL in schema — skip if no product found
+    # best_product_id is NOT NULL in schema.
+    # This only triggers if no product row exists in dikgoboro_products
+    # for this coverage_type + age_band combination at any cover level.
     if not best_product:
         return {
             "status":      "skipped",
-            "reason":      f"no_qualifying_product (score={nerve_score}, "
-                           f"type={coverage_type}, age_band={age_band})",
+            "reason":      f"no_product_in_catalogue (type={coverage_type}, "
+                           f"age_band={age_band}) — check dikgoboro_products table",
             "nerve_score": nerve_score,
         }
 
@@ -534,6 +621,7 @@ def generate_recommendations_for_all_pending() -> Dict[str, Any]:
             supabase()
             .table("dikgoboro_clients")
             .select("id")
+            .eq("product_interest", "Funeral Insurance")
             .execute()
             .data or []
         )
