@@ -1,0 +1,62 @@
+name: Deploy to AWS App Runner
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      - name: Deploy to App Runner
+        uses: awslabs/amazon-app-runner-deploy@main
+        with:
+          service: dikgoboro-nerve
+          source-connection-arn: ${{ secrets.APP_RUNNER_CONNECTION_ARN }}
+          repo: https://github.com/${{ github.repository }}
+          branch: main
+          runtime: PYTHON_311
+          build-command: pip install -r requirements.txt
+          start-command: uvicorn app.main:app --host 0.0.0.0 --port 8080
+          port: 8080
+          region: eu-west-1
+          cpu: 1
+          memory: 2
+          wait-for-service-stability-seconds: 180
+          copy-env-vars: |
+            SUPABASE_URL
+            SUPABASE_SERVICE_ROLE_KEY
+            XDS_USERNAME
+            XDS_PASSWORD
+            XDS_PRODUCT_ID
+            XDS_REPORT_ID
+            XDS_WSDL_PROD
+            XDS_ENV
+            BUREAU_POLL_INTERVAL_SECONDS
+            BUREAU_BATCH_SIZE
+            BUREAU_FRESHNESS_DAYS
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          XDS_USERNAME: ${{ secrets.XDS_USERNAME }}
+          XDS_PASSWORD: ${{ secrets.XDS_PASSWORD }}
+          XDS_PRODUCT_ID: ${{ secrets.XDS_PRODUCT_ID }}
+          XDS_REPORT_ID: ${{ secrets.XDS_REPORT_ID }}
+          XDS_WSDL_PROD: ${{ secrets.XDS_WSDL_PROD }}
+          XDS_ENV: ${{ secrets.XDS_ENV }}
+          BUREAU_POLL_INTERVAL_SECONDS: ${{ secrets.BUREAU_POLL_INTERVAL_SECONDS }}
+          BUREAU_BATCH_SIZE: ${{ secrets.BUREAU_BATCH_SIZE }}
+          BUREAU_FRESHNESS_DAYS: ${{ secrets.BUREAU_FRESHNESS_DAYS }}
