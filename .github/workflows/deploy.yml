@@ -35,7 +35,7 @@ jobs:
           region: eu-west-1
           cpu: 1
           memory: 2
-          wait-for-service-stability-seconds: 180
+          wait-for-service-stability-seconds: 300
           copy-env-vars: |
             SUPABASE_URL
             SUPABASE_SERVICE_ROLE_KEY
